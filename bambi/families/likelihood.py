@@ -13,6 +13,7 @@ DISTRIBUTIONS = {
     "Gamma": DistSettings(params=("mu", "alpha"), parent="mu"),
     "Multinomial": DistSettings(params=("p",), parent="p"),
     "Normal": DistSettings(params=("mu", "sigma"), parent="mu"),
+    "LogNormal": DistSettings(params=("mu", "sigma"), parent="mu"),
     "NegativeBinomial": DistSettings(params=("mu", "alpha"), parent="mu"),
     "Laplace": DistSettings(params=("mu", "b"), parent="mu"),
     "Poisson": DistSettings(params=("mu",), parent="mu"),
