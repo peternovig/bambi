@@ -166,12 +166,18 @@ class DistributionalComponent:
         # Prepare dims objects
         response_name = get_aliased_name(self.spec.response_component.response_term)
         response_dim = response_name + "_obs"
-        response_levels_dim = response_name + "_dim"
         linear_predictor_dims = ("chain", "draw", response_dim)
         to_stack_dims = ("chain", "draw")
         design_matrix_dims = (response_dim, "__variables__")
 
-        if isinstance(self.spec.family, (multivariate.MultivariateFamily, univariate.Categorical)):
+        # These families drop a level in the response
+        if isinstance(self.spec.family, (multivariate.Multinomial, univariate.Categorical)):
+            response_levels_dim = response_name + "_reduced_dim"
+            to_stack_dims = to_stack_dims + (response_levels_dim,)
+            linear_predictor_dims = linear_predictor_dims + (response_levels_dim,)
+        # These families DON'T drop any level in the response
+        elif isinstance(self.spec.family, multivariate.MultivariateFamily):
+            response_levels_dim = response_name + "_dim"
             to_stack_dims = to_stack_dims + (response_levels_dim,)
             linear_predictor_dims = linear_predictor_dims + (response_levels_dim,)
 
@@ -207,6 +213,11 @@ class DistributionalComponent:
                 else:
                     maximum_distance = 1
 
+                # NOTE:
+                # The approach here differs from the one in the PyMC implementation.
+                # Here we have a single dot product with many zeros, while there we have many
+                # smaller dot products.
+                # It is subject to change here, but I don't want to mess up dims and coords.
                 if term.by_levels is not None:
                     by_values = x_slice[:, -1].astype(int)
                     x_slice = x_slice[:, :-1]
@@ -222,7 +233,7 @@ class DistributionalComponent:
                     x_slice_centered = (x_slice - term.mean) / maximum_distance
                     phi = term.hsgp.prior_linearized(x_slice_centered)[0].eval()
 
-                # Convert 'phi' and 'sqrt_psd' to xarray.DataArrays for easier math
+                # Convert 'phi' to xarray.DataArray for easier math
                 # Notice the extra '_' in the dim name for the weights
                 phi = xr.DataArray(phi, dims=(response_dim, f"{term_aliased_name}__weights_dim"))
                 weights = posterior[f"{term_aliased_name}_weights"]
@@ -277,17 +288,13 @@ class DistributionalComponent:
         if hasattr(family, "transform_linear_predictor"):
             linear_predictor = family.transform_linear_predictor(self.spec, linear_predictor)
 
-        if hasattr(family, "UFUNC_KWARGS"):
-            ufunc_kwargs = family.UFUNC_KWARGS
-        else:
-            ufunc_kwargs = {}
-
         if self.response_kind == "data":
             linkinv = family.link[family.likelihood.parent].linkinv
         else:
             linkinv = family.link[self.response_name].linkinv
 
-        response = xr.apply_ufunc(linkinv, linear_predictor, kwargs=ufunc_kwargs)
+        invlink_kwargs = getattr(family, "INVLINK_KWARGS", {})
+        response = xr.apply_ufunc(linkinv, linear_predictor, kwargs=invlink_kwargs)
 
         if hasattr(family, "transform_coords"):
             response = family.transform_coords(self.spec, response)

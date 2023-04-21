@@ -20,7 +20,7 @@ class CommonTerm(BaseTerm):
         if (
             not self.categorical
             and self.kind not in ("intercept", "offset")
-            and np.all(self.data == self.data[0])
+            and np.all(self.data == self.data)
         ):
             raise ValueError(f"The term '{self.name}' is constant!")
 

@@ -11,7 +11,7 @@ from bambi.backend.utils import (
     get_linkinv,
     GP_KERNELS,
 )
-from bambi.families.multivariate import MultivariateFamily
+from bambi.families.multivariate import MultivariateFamily, Multinomial, DirichletMultinomial
 from bambi.families.univariate import Categorical
 from bambi.priors import Prior
 from bambi.utils import get_aliased_name
@@ -126,7 +126,7 @@ class GroupSpecificTerm:
         new_coords = {}
         for key, value in coords.items():
             _, kind = key.split("__")
-            new_coords[self.term.alias + kind] = value
+            new_coords[self.term.alias + "__" + kind] = value
         return new_coords
 
     def build_distribution(self, prior, label, **kwargs):
@@ -288,6 +288,11 @@ class ResponseTerm:
         # linear predictor because the family is not multivariate.
         # In this case, we add extra dimensions to avoid having shape mismatch between the data
         # and the shape implied by the `dims` we pass.
+
+        # Don't do it for the Multinomial families (it's an exception)
+        if isinstance(self.family, (Multinomial, DirichletMultinomial)):
+            return kwargs
+
         dims, data = kwargs["dims"], kwargs["observed"]
         dims_n = len(dims)
         ndim_diff = data.ndim - dims_n
@@ -353,33 +358,35 @@ class HSGPTerm:
 
         # Build HSGP and store it in the term.
         if self.term.by_levels is not None:
-            flatten_coeffs = True
             coeff_dims = coeff_dims + (f"{label}_by",)
             phi_list, sqrt_psd_list = [], []
             self.term.hsgp = {}
+            # Because of the filter in the loop, it will be as if the observations were sorted
+            # using the values of the 'by' variable.
+            # This approach helps especially when there are many groups, which causes many zeros
+            # with other approaches (until PyMC and us have better support for sparse matrices)
+            indexes_to_unsort = self.term.by.argsort(kind="mergesort").argsort(kind="mergesort")
             for i, level in enumerate(self.term.by_levels):
                 cov_func = covariance_functions[i]
+                # Notes:
+                # 'm' doesn't change by group
+                # We need to use list() in 'm' and 'L' because arrays are not instance of Sequence
                 hsgp = pm.gp.HSGP(
-                    m=list(self.term.m),  # Doesn't change by group
-                    L=list(self.term.L[i]),  # 1d array is not a Sequence
+                    m=list(self.term.m),
+                    L=list(self.term.L[i]),
                     drop_first=self.term.drop_first,
                     cov_func=cov_func,
                 )
                 # Notice we pass all the values, for all the groups.
                 # Then we only keep the ones for the corresponding group.
-                phi, sqrt_psd = hsgp.prior_linearized(data)
-                phi = phi.eval()
-                phi[self.term.by != i] = 0
+                phi, sqrt_psd = hsgp.prior_linearized(data[self.term.by == i])
                 sqrt_psd_list.append(sqrt_psd)
-                phi_list.append(phi)
+                phi_list.append(phi.eval())
 
                 # Store it for later usage
                 self.term.hsgp[level] = hsgp
-
-            phi = np.hstack(phi_list)
             sqrt_psd = pt.stack(sqrt_psd_list, axis=1)
         else:
-            flatten_coeffs = False
             (cov_func,) = covariance_functions
             self.term.hsgp = pm.gp.HSGP(
                 m=list(self.term.m),
@@ -399,9 +406,18 @@ class HSGPTerm:
             coeffs = pm.Deterministic(f"{label}_weights", coeffs_raw * sqrt_psd, dims=coeff_dims)
 
         # Build deterministic for the HSGP contribution
-        if flatten_coeffs:
-            coeffs = coeffs.T.flatten()  # Equivalent to .flatten("F")
-        output = pm.Deterministic(label, phi @ coeffs, dims=contribution_dims)
+        # If there are groups, we do as many dot products as groups
+        if self.term.by_levels is not None:
+            contribution_list = []
+            for i in range(len(self.term.by_levels)):
+                contribution_list.append(phi_list[i] @ coeffs[:, i])
+            # We need to unsort the contributions so they match the original data
+            contribution = pt.concatenate(contribution_list)[indexes_to_unsort]
+        # If there are no groups, it's a single dot product
+        else:
+            contribution = phi @ coeffs
+
+        output = pm.Deterministic(label, contribution, dims=contribution_dims)
         return output
 
     def get_covariance_functions(self):
